@@ -78,26 +78,35 @@ var ionCall = class ionCall {
 		_session.on('terminated', function(message, cause) {
 			$self.onDestroy( cause );
 			$self.terminated = true;
-			$self.onStatusChange();
+			$self.onStatusChange('terminated');
 		});
 
 		_session.on('progress', function(message, cause) {
-			$self.onStatusChange();
+			$self.onStatusChange('progress');
 		});
 
 		_session.on('accepted', function(message, cause) {
 			$self.answered = true;
-			$self.onStatusChange();
+			$self.onStatusChange('accepted');
 		});
 
 		_session.on('muted', function(message, cause) {
 			$self.isMuted = true;
-			$self.onStatusChange();
+			$self.onStatusChange('muted');
 		});
 
 		_session.on('unmuted', function(message, cause) {
 			$self.isMuted = false;
-			$self.onStatusChange();
+			$self.onStatusChange('unmuted');
+		});
+		_session.on('trackAdded', function() {
+			var pc = _session.sessionDescriptionHandler.peerConnection;
+			var remoteStream = new MediaStream();
+			pc.getReceivers().forEach(function(receiver) {
+			    remoteStream.addTrack(receiver.track);
+			});
+			$self.audio.srcObject = remoteStream;
+			$self.audio.play().then(()=>{}).catch(()=>{});
 		});
 
 
@@ -143,13 +152,12 @@ var ionCall = class ionCall {
 
 	answer(){
 		this.session.accept({
-			media: {
-				render: { remote: this.audio },
-				constraints: {                                                                                                                                                            
-                	audio: true,                                                                                                                                                             
-                	video: false                                                                                                                                                             
-                } 
-			}
+			sessionDescriptionHandlerOptions: {
+				constraints: {
+                		audio: true,
+				video: false                                                                                                                                                             
+                		}, 
+			},
 		});
 	}
 
@@ -179,7 +187,6 @@ var ionPhone = class ionPhone {
 
     if (!checkRTC()){ this.unsupported = true; this.render(); return; }
 
-
 		if (settings.display.ring) {
 			var audio = document.createElement('audio');
 			audio.autoplay = false;
@@ -189,13 +196,31 @@ var ionPhone = class ionPhone {
 			document.body.appendChild(audio);
 			this.ring = audio;
 		}
+
+		if (settings.display.ringback) {
+			var audio = document.createElement('audio');
+			audio.autoplay = false;
+			audio.src = settings.display.ringback;
+			audio.loop = true;
+			//audio.style = 'display:none';
+			document.body.appendChild(audio);
+			this.ringback = audio;
+		}
 		
 		var $self = this;
 		$self.calls = [];
 
 		$self.ua = new SIP.UA({
 			uri: settings.connection.identity || 'anonymous@invalid',
-			wsServers: [ settings.connection.wss ],
+			transportOptions: { traceSip:true, wsServers: [ settings.connection.wss ] },
+			sessionDescriptionHandlerFactoryOptions: { 
+				peerConnectionOptions: {
+					rtcConfiguration: { iceServers: [ 
+						{urls: ['stun:pbx0.rtclogic.com']} 
+					] },
+					iceCheckingTimeout: 2000
+				} 
+			},
 			register: settings.connection.register,
 			password: settings.connection.password,
 			userAgentString: 'ionPhone/1',
@@ -444,7 +469,7 @@ var ionPhone = class ionPhone {
 					call.mute(!call.mute());
 				}
 				btn.className = 'ionMuteButton ' + call.mute();
-				pan.appendChild(btn);
+				//pan.appendChild(btn);
 			}
 
 			footer.appendChild(pan);
@@ -456,12 +481,8 @@ var ionPhone = class ionPhone {
 	call( number ){
 		var $self = this;
 
-		var call = new ionCall();
-		call.addAudio();
-
 		var session = $self.ua.invite(number,{
-			media: {
-				render: { remote: call.audio },
+			sessionDescriptionHandlerOptions: {
 				constraints: {                                                                                                                                                            
                 	audio: true,                                                                                                                                                             
                 	video: false                                                                                                                                                             
@@ -469,9 +490,8 @@ var ionPhone = class ionPhone {
 			}
 
 		});
-		call.session = session;
 
-		call.onDestroy = function () {
+		var call = ionCall.fromSession(session, function () {
 			var i = $self.calls.findIndex(function (el, index, array) {
 				return call.id === el.id;
 			});
@@ -479,12 +499,36 @@ var ionPhone = class ionPhone {
 				{ console.warn("Destroyed call was not found in queue"); }
 			else $self.calls.splice(i,1);
 			call.removeAudio();
-		};
+		});
 
 		call.direction = 'outbound';
-		call.onStatusChange = function () {
+		call.addAudio();
+		call.onStatusChange = function (status) {
+			if(status == 'progress') {
+				if($self.ringback) {
+					$self.ringback.currentTime = 0;
+					$self.ringback.play().then(()=>{}).catch(()=>{});
+				}
+			}
+			if(status == 'accepted') {
+				if($self.ringback) $self.ringback.pause();
+			}
+			if(status == 'terminated') {
+				if($self.ringback) $self.ringback.pause();
+			}
 			$self.render();
 		};
+
+		call.session.on('trackAdded', function() {
+			var pc = call.session.sessionDescriptionHandler.peerConnection;
+			var remoteStream = new MediaStream();
+			pc.getReceivers().forEach(function(receiver) {
+			    remoteStream.addTrack(receiver.track);
+			});
+			call.audio.srcObject = remoteStream;
+			call.audio.play().then(()=>{}).catch(()=>{});
+		});
+
 		$self.calls.push(call);
 	}
 
